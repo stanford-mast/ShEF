@@ -1,0 +1,358 @@
+//Mark Zhao
+//7/14/20
+//This module takes in a cache line, and replies to the read master with data
+
+`default_nettype none
+`timescale 1ns/1ps
+module shield_read_slv #(
+  parameter integer CL_ID_WIDTH = 6,
+  parameter integer CL_DATA_WIDTH = 64,
+  parameter integer LINE_WIDTH = 512,
+  parameter integer OFFSET_WIDTH = 6,
+  parameter integer BURSTS_PER_LINE = 8,
+  parameter integer BURSTS_PER_LINE_LOG = 3
+)
+(
+  input  wire clk,
+  input  wire rst_n,
+  //Input request from datapath
+  input  wire [LINE_WIDTH-1:0]   cache_line, //Data 
+  input  wire [7:0]              burst_count,  //How many bursts to send from this line
+  input  wire [OFFSET_WIDTH-1:0] burst_start_offset, //At which byte to start the burst
+  input  wire                    burst_last, //set when this is the last burst in the request
+  input  wire                    input_val,
+  output wire                    input_rdy,
+
+  output wire                    busy,
+
+
+  //Output to CL
+  output wire [CL_ID_WIDTH-1:0]            s_axi_rid, //SET TO 0
+  output wire [CL_DATA_WIDTH-1:0]          s_axi_rdata,
+  output wire [1:0]                        s_axi_rresp, //ALWAYS SUCCESS
+  output wire                              s_axi_rlast, 
+  output wire                              s_axi_rvalid,
+  input  wire                              s_axi_rready
+
+);
+  //////////////////////////////////////////////////////////////////////////////
+  // localparams
+  //////////////////////////////////////////////////////////////////////////////
+  localparam STATE_IDLE = 2'd0,
+             STATE_READ = 2'd1;
+
+  localparam integer CL_DATA_WIDTH_BYTES = CL_DATA_WIDTH / 8;
+  localparam integer FIFO_BUFFER_DEPTH = 2048 / CL_DATA_WIDTH_BYTES;
+
+  localparam integer FIFO_BUFFER_DEPTH_LOG = $clog2(FIFO_BUFFER_DEPTH);
+
+
+  //////////////////////////////////////////////////////////////////////////////
+  // Internal variables
+  //////////////////////////////////////////////////////////////////////////////
+  logic input_rdy_r;
+  logic input_rxfer; //1 when a valid input is transferred
+  logic load_input;
+  logic [LINE_WIDTH-1:0] cache_line_r;
+  logic [CL_DATA_WIDTH-1:0] cache_line_mux_out;
+
+  logic [BURSTS_PER_LINE_LOG-1:0] burst_index_r;
+  logic [BURSTS_PER_LINE_LOG-1:0] burst_start_index;
+  logic [7:0] burst_count_remaining_r;
+  logic burst_done;
+  logic burst_last_r;
+
+  logic [1:0] state_r;
+  logic [1:0] next_state;
+
+  //FIFO signals
+  logic shield_output_fifo_wr_en;
+  logic shield_output_fifo_rd_en;
+  logic [CL_DATA_WIDTH-1:0] shield_output_fifo_dout;
+  logic shield_output_fifo_full;
+  logic shield_output_fifo_empty;
+
+  logic [FIFO_BUFFER_DEPTH_LOG:0] fifo_count;
+  logic fifo_rxfer;
+  logic fifo_txfer;
+  logic fifo_rlast;
+  logic fifo_empty;
+
+  logic cs_s_axi_rlast;
+  
+  //////////////////////////////////////////////////////////////////////////////
+  // Datapath
+  //////////////////////////////////////////////////////////////////////////////
+  assign input_rxfer = (input_val & input_rdy_r);
+  assign load_input = input_rxfer; //to get rid of weird simulation bug
+
+  shield_enreg #(.WIDTH(LINE_WIDTH)) line_reg (
+    .clk(clk),
+    .q(cache_line_r),
+    .d(cache_line),
+    .en(load_input)
+  );
+
+  shield_enreg #(.WIDTH(1)) last_reg (
+    .clk(clk),
+    .q(burst_last_r),
+    .d(burst_last),
+    .en(load_input)
+  );
+
+  assign burst_start_index = burst_start_offset[OFFSET_WIDTH-1 -: BURSTS_PER_LINE_LOG]; //take the top bits of the addr
+
+  //Counter for select signal
+  shield_counter #(
+    .C_WIDTH(BURSTS_PER_LINE_LOG)
+  ) burst_index_counter (
+    .clk(clk),
+    .clken(1'b1),
+    .rst(~rst_n),
+    .load(load_input),
+    .incr(shield_output_fifo_wr_en),
+    .decr(1'b0),
+    .load_value(burst_start_index),
+    .count(burst_index_r),
+    .is_zero()
+  );
+  //counter for remaining bursts
+  shield_counter #(
+    .C_WIDTH(8)
+  ) burst_count_counter (
+    .clk(clk),
+    .clken(1'b1),
+    .rst(~rst_n),
+    .load(load_input),
+    .incr(1'b0),
+    .decr(shield_output_fifo_wr_en),
+    .load_value(burst_count),
+    .count(burst_count_remaining_r),
+    .is_zero(burst_done)
+  );
+
+  //Connect cache line to fifo
+  shield_muxp #(
+    .BUS_WIDTH(LINE_WIDTH),
+    .OUTPUT_WIDTH(CL_DATA_WIDTH),
+    .SELECT_WIDTH(BURSTS_PER_LINE_LOG),
+    .SELECT_COUNT(BURSTS_PER_LINE)
+  ) cache_line_mux (
+    .in_bus(cache_line_r),
+    .sel(burst_index_r),
+    .out(cache_line_mux_out)
+  );
+
+	//Back-end logic for output
+	//Note: This can buffer up to 4KB. Thus, chunks can't be larger than 4KB
+  //Buffer that outputs to axi master
+	xpm_fifo_sync # (
+	  .FIFO_MEMORY_TYPE          ("auto"),           //string; "auto", "block", "distributed", or "ultra";
+	  .ECC_MODE                  ("no_ecc"),         //string; "no_ecc" or "en_ecc";
+	  .FIFO_WRITE_DEPTH          (FIFO_BUFFER_DEPTH),   //positive integer
+	  .WRITE_DATA_WIDTH          (CL_DATA_WIDTH),               //positive integer
+	  .WR_DATA_COUNT_WIDTH       ($clog2(FIFO_BUFFER_DEPTH)),               //positive integer, Not used
+	  .PROG_FULL_THRESH          (10),               //positive integer, Not used 
+	  .FULL_RESET_VALUE          (1),                //positive integer; 0 or 1
+	  .READ_MODE                 ("fwft"),            //string; "std" or "fwft";
+	  .FIFO_READ_LATENCY         (0),                //positive integer;
+	  .READ_DATA_WIDTH           (CL_DATA_WIDTH),               //positive integer
+	  .RD_DATA_COUNT_WIDTH       ($clog2(FIFO_BUFFER_DEPTH)),               //positive integer, not used
+	  .PROG_EMPTY_THRESH         (10),               //positive integer, not used 
+	  .DOUT_RESET_VALUE          ("0"),              //string, don't care
+	  .WAKEUP_TIME               (0)                 //positive integer; 0 or 2;
+	) shield_output_fifo_sync (
+  	.sleep         ( 1'b0             ) ,
+  	.rst           ( ~rst_n           ) ,
+  	.wr_clk        ( clk           ) ,
+  	.wr_en         ( shield_output_fifo_wr_en ) ,
+  	.din           ( cache_line_mux_out ) ,
+  	.full          ( shield_output_fifo_full ) ,
+  	.prog_full     (                  ) ,
+  	.wr_data_count (                  ) ,
+  	.overflow      (                  ) ,
+  	.wr_rst_busy   (                  ) ,
+  	.rd_en         ( shield_output_fifo_rd_en ) ,
+  	.dout          ( shield_output_fifo_dout ) ,
+  	.empty         ( shield_output_fifo_empty ) ,
+  	.prog_empty    (                  ) ,
+  	.rd_data_count (                  ) ,
+  	.underflow     (                  ) ,
+  	.rd_rst_busy   (                  ) ,
+  	.injectsbiterr ( 1'b0             ) ,
+  	.injectdbiterr ( 1'b0             ) ,
+  	.sbiterr       (                  ) ,
+  	.dbiterr       (                  ) 
+	);
+
+  //FIFO to keep track of when to signal rlast
+	xpm_fifo_sync # (
+	  .FIFO_MEMORY_TYPE          ("auto"),           //string; "auto", "block", "distributed", or "ultra";
+	  .ECC_MODE                  ("no_ecc"),         //string; "no_ecc" or "en_ecc";
+	  .FIFO_WRITE_DEPTH          (FIFO_BUFFER_DEPTH),   //positive integer
+	  .WRITE_DATA_WIDTH          (CL_DATA_WIDTH),               //positive integer
+	  .WR_DATA_COUNT_WIDTH       ($clog2(FIFO_BUFFER_DEPTH)),               //positive integer, Not used
+	  .PROG_FULL_THRESH          (10),               //positive integer, Not used 
+	  .FULL_RESET_VALUE          (1),                //positive integer; 0 or 1
+	  .READ_MODE                 ("fwft"),            //string; "std" or "fwft";
+	  .FIFO_READ_LATENCY         (0),                //positive integer;
+	  .READ_DATA_WIDTH           (CL_DATA_WIDTH),               //positive integer
+	  .RD_DATA_COUNT_WIDTH       ($clog2(FIFO_BUFFER_DEPTH)),               //positive integer, not used
+	  .PROG_EMPTY_THRESH         (10),               //positive integer, not used 
+	  .DOUT_RESET_VALUE          ("0"),              //string, don't care
+	  .WAKEUP_TIME               (0)                 //positive integer; 0 or 2;
+	) shield_output_fifo_sync (
+  	.sleep         ( 1'b0             ) ,
+  	.rst           ( ~rst_n           ) ,
+  	.wr_clk        ( clk           ) ,
+  	.wr_en         ( shield_output_fifo_wr_en ) ,
+  	.din           ( cache_line_mux_out ) ,
+  	.full          ( shield_output_fifo_full ) ,
+  	.prog_full     (                  ) ,
+  	.wr_data_count (                  ) ,
+  	.overflow      (                  ) ,
+  	.wr_rst_busy   (                  ) ,
+  	.rd_en         ( shield_output_fifo_rd_en ) ,
+  	.dout          ( shield_output_fifo_dout ) ,
+  	.empty         ( shield_output_fifo_empty ) ,
+  	.prog_empty    (                  ) ,
+  	.rd_data_count (                  ) ,
+  	.underflow     (                  ) ,
+  	.rd_rst_busy   (                  ) ,
+  	.injectsbiterr ( 1'b0             ) ,
+  	.injectdbiterr ( 1'b0             ) ,
+  	.sbiterr       (                  ) ,
+  	.dbiterr       (                  ) 
+	);
+
+  //Counter for output
+  assign fifo_rxfer = (!shield_output_fifo_full) && shield_output_fifo_wr_en;
+  assign fifo_txfer = (!shield_output_fifo_empty) && shield_output_fifo_rd_en;
+  shield_counter #(
+    .C_WIDTH(FIFO_BUFFER_DEPTH_LOG+1)
+  ) fifo_count_counter (
+    .clk(clk),
+    .clken(1'b1),
+    .rst(~rst_n),
+    .load(1'b0),
+    .incr(fifo_rxfer),
+    .decr(fifo_txfer),
+    .load_value(0),
+    .count(fifo_count),
+    .is_zero(fifo_empty)
+  );
+
+
+  //Tie off unused axi signals
+  assign s_axi_rid = 0;
+  assign s_axi_rdata = shield_output_fifo_dout;
+  assign s_axi_rresp = 2'b0;
+  assign s_axi_rlast = cs_s_axi_rlast;
+  assign s_axi_rvalid = (~shield_output_fifo_empty); //output valid if not empty
+  assign shield_output_fifo_rd_en = s_axi_rready; //read enabled if master is ready - no effect if empty
+
+
+
+  //////////////////////////////////////////////////////////////////////////////
+  // Control logic
+  //////////////////////////////////////////////////////////////////////////////
+  always_ff @(posedge clk) begin
+    if(!rst_n) begin
+      state_r <= STATE_IDLE;
+    end
+    else begin
+      state_r <= next_state;
+    end
+  end
+
+  //State transition
+  always_comb begin
+    next_state = state_r;
+    case (state_r)
+      STATE_IDLE: begin //Wait for request
+        if(load_input) begin
+          if(burst_last) begin
+            next_state = STATE_READ_LAST;
+          end
+          else begin
+            next_state = STATE_READ;
+          end
+        end
+      end
+      STATE_READ: begin //Read until all bursts have been put into fifo
+        if(burst_done) begin
+          if(input_val) begin //load input
+            if(burst_last) begin
+              next_state = STATE_READ_LAST; 
+            end
+            else begin
+              next_state = STATE_READ;
+            end
+          end
+          else begin
+            //input not valid
+            next_state = STATE_READ_WAIT;
+          end
+        end
+      end
+      STATE_READ_WAIT: begin
+        if(load_input) begin
+          if(burst_last) begin
+            next_state = STATE_READ_LAST;
+          end
+          else begin
+            next_state = STATE_READ;
+          end
+        end
+      end
+      STATE_READ_LAST: begin //burst signaled with last
+        if(burst_done && fifo_empty) begin
+          next_state = STATE_IDLE;
+        end
+      end
+    endcase
+  end
+
+  //Output
+  always_comb begin
+    //default
+    input_rdy_r = 1'b0;
+    shield_output_fifo_wr_en = 1'b0;
+    cs_s_axi_rlast = 1'b0;
+    case (state_r)
+      STATE_IDLE: begin
+        input_rdy_r = 1'b1; //Wait for request
+        shield_output_fifo_wr_en = 1'b0;
+      end
+      STATE_READ: begin
+        //If there's still bursts remaining and the fifo isn't full
+        if(!burst_done && !shield_output_fifo_full) begin
+          shield_output_fifo_wr_en = 1'b1;
+        end
+
+        //If burst is done, signal ready this cycle
+        if(burst_done) begin
+          input_rdy_r = 1'b1;
+        end
+      end
+      STATE_READ_WAIT: begin
+        input_rdy_r = 1'b1; //Wait for request
+      end
+      STATE_READ_LAST: begin
+        if(!burst_done && !shield_output_fifo_full) begin
+          shield_output_fifo_wr_en = 1'b1;
+        end
+        if(burst_done && (fifo_count == {{(FIFO_BUFFER_DEPTH_LOG){1'b0}}, 1'b1})) begin
+          cs_s_axi_rlast = 1'b1;
+        end
+      end
+    endcase
+  end
+
+  assign input_rdy = input_rdy_r;
+
+
+
+endmodule : shield_read_slv
+
+`default_nettype wire
