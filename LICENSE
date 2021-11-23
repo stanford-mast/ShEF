@@ -1,3 +1,6 @@
+Copyright for ShEF is held under the MIT license by the Board of Trustees of Stanford University, 2021. 
+Some portions of ShEF, such as cryptographic modules and benchmark applications, may be held under a separate license as specified in their respective files and directories.
+
 MIT License
 
 Copyright (c) 2021 Board of Trustees of Stanford University
