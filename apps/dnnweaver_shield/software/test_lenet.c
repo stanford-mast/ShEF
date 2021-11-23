@@ -156,9 +156,9 @@ int main(int argc, char** argv){
   base_addr = 0;
   len = 888720;
 
-  for(i = 0; i < len; i++){
-    write_buffer[i] = 0;
-  }
+  // for(i = 0; i < len; i++){
+  //   write_buffer[i] = 0;
+  // }
   offset = 0;
   while(offset < len){
     size_t bytes_to_write;
