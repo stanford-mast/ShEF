@@ -66,8 +66,113 @@ There are a few one-time steps required to setup the necessary AWS infrastructur
     cd $AWS_FPGA_REPO_DIR
     git checkout tags/v1.4.14
     ```
+    - In certain applications, a compilation error may arise when using the SDK Runtime. To fix this, we need to patch two files.
+        - In `$AWS_FPGA_REPO_DIR/sdk/userspace/fpga_libs/fpga_dma/fpga_dma_utils.c`, remove `static` from Line 91.
+        - In `$AWS_FPGA_REPO_DIR/sdk/userspace/include/fpga_dma.h`, remove `static` from Line 73.
+5. Configure your AWS credentials
+    ```
+        $ aws configure # to set your credentials (found in your console.aws.amazon.com page) and instance region (us-east-1, us-west-2, eu-west-1 or us-gov-west-1)
+    ```
 
 ### Runtime Instance Setup
 We use a separate F1 instance to run the actual accelerator bitstream, as F1 instances are more expensive to develop on.
 Repeat the same steps from [Developer Instance Setup](#developer-instance-setup), except use a `f1.2xlarge` instance.
+
+
+# Using ShEF
+ShEF's project structure is organized as follows.
+- `apps/`: Benchmark applications built using the Hardware Development Kit (pure RTL).
+- `hdk/`: Source code for the ShEF Shield.
+
+## Example Workflow using DNNWeaver
+Next, we walk through how to build and run an accelerator using DNNWeaver, with Shield enabled, as an example.
+Detailed instructions for building a bitstream can be found at https://github.com/aws/aws-fpga/tree/master/hdk#simcl.
+
+### Building the Custom Logic
+The Hardware Development Kit reliees on a `CL_DIR` enviroment variable to be set to the appropriate root directory for the application.
+For the DNNWeaver (with Shield), this can be found at `$SHEF_DIR/apps/dnnweaver_shield`.
+
+```
+cd $SHEF_DIR/apps/dnnweaver_shield
+export CL_DIR=$(pwd)
+```
+
+Next, we need to setup the HDK build environment.
+```
+source $AWS_FPGA_REPO_DIR/hdk_setup.sh
+```
+
+To build the accelerator bitstream, simply run the following.
+```
+./aws_build_dcp_from_cl.sh -foreground
+```
+Note that this process will take multiple hours. Either run in a persistent session (e.g. `tmux`) or omit `foreground` to use a `nohup` context so that terminated SSH sessions do not terminate the build.
+
+### Submit the DCP to AWS
+The build script aboe will generate a design checkpoint `.dcp` file. However, this is not the final bitstream.
+You must submit the DCP file to AWS, who will in turn build the final bitstream.
+
+First, upload the DCP tarball to the S3 bucket you created earlier.
+```
+$ aws s3 cp $CL_DIR/build/checkpoints/to_aws/*.Developer_CL.tar \       # Upload the file to S3
+             s3://<bucket-name>/<dcp-folder-name>/
+```
+
+Then, use the AWS CLI to create the final bitstream (AFI).
+```
+$ aws ec2 create-fpga-image \
+    --region <region> \
+    --name <afi-name> \
+    --description <afi-description> \
+    --input-storage-location Bucket=<dcp-bucket-name>,Key=<path-to-tarball> \
+    --logs-storage-location Bucket=<logs-bucket-name>,Key=<path-to-logs> \
+[ --client-token <value> ] \
+[ --dry-run | --no-dry-run ]
+
+NOTE: <path-to-tarball> is <dcp-folder-name>/<tar-file-name>
+      <path-to-logs> is <logs-folder-name>
+```
+
+The command outputs two identifiers to your AFI, an *AFI ID* and an *AGFI ID*. Save both.
+
+You can check the status of your AFI by running 
+```
+$ aws ec2 describe-fpga-images --fpga-image-ids <your-afi-id>
+```
+
+Once the above command has the state set to `available`, your AFI is ready to run. 
+This process typically takes under an hour.
+
+### Run your AFI
+Finally, you are ready to load and run your accelerator.
+SSH into your F1 runtime instance.
+
+First, setup the necessary runtime enviroment.
+```
+$ sudo su
+$ cd $AWS_FPGA_REPO_DIR
+$ source sdk_setup.sh
+```
+
+Next, make sure that you clear the FPGA, and then load your AFI instance into the FPGA.
+```
+$ fpga-clear-local-image  -S 0
+$ fpga-load-local-image -S 0 -I <your-agfi-id>  # Use the AGFI, not AFI.
+```
+
+You can confirm that your instance is properly loaded via the following.
+
+```
+$ fpga-describe-local-image -S 0 -R -H
+```
+
+Finally, build and run the executable to test your accelerator. `$CL_DIR` is the same root directory that you set above for the development instance.
+```
+$ cd $CL_DIR/software
+$ make
+$ ./test_lenet
+```
+
+## Customizing ShEF
+
 
