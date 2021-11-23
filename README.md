@@ -173,6 +173,12 @@ $ make
 $ ./test_lenet
 ```
 
-## Customizing ShEF
+## Using ShEF in a Custom Project
+ShEF secures two primary interfaces: a AXI-4 interface (e.g., for DRAM), and an AXI-L interface (e.g., for register access).
+To use ShEF, simply include `hdk/lib/shield/shield_wrapper.sv` into your project (for the AXI-4 interface), `hdk/lib/free_control_s_axi.v` (for an unsecure AXI-L interface), and `hdk/lib/light/light_{decryptor, encryptor}.sv` (for a secure AXI-L interface).
+Be sure to include the relevant modules in your build scripts.
+Refer to example applications for more information on using ShEF in your project.
 
+To customize ShEF, ShEF exposes a set of parameters in `hdk/interfaces/free_common_defines.vh`.
+Please refer to the file for customization options.
 
