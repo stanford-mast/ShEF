@@ -1,0 +1,37 @@
+`timescale 1ns/1ps
+module counter #(
+    // INPUT PARAMETERS
+    parameter COUNT_WIDTH               = 3
+)
+(
+    // PORTS
+    input   wire                        CLK,
+    input   wire                        RESET,
+
+    input   wire                        INC,
+    input   wire [COUNT_WIDTH-1    : 0] MAX_COUNT,
+
+    output  wire                        OVERFLOW,
+    output  reg  [COUNT_WIDTH-1   : 0]  COUNT
+);
+
+// ******************************************************************
+// CONTROL LOGIC
+// ******************************************************************
+
+    assign OVERFLOW = INC && (COUNT == MAX_COUNT);
+
+    // COUNTER
+    always @ (posedge CLK)
+    begin : COUNTER
+        if (RESET)
+            COUNT <= 0;
+        else begin
+            if (INC && !OVERFLOW)
+                COUNT <= COUNT + 1;
+            else if (OVERFLOW)
+                COUNT <= 0;
+        end
+    end
+        
+endmodule

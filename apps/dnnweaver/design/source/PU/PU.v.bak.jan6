@@ -1,0 +1,429 @@
+`timescale 1ns/1ps
+//-----------------------------------------------------------
+//Simple Log2 calculation function
+//-----------------------------------------------------------
+`define C_LOG_2(n) (\
+(n) <= (1<<0) ? 0 : (n) <= (1<<1) ? 1 :\
+(n) <= (1<<2) ? 2 : (n) <= (1<<3) ? 3 :\
+(n) <= (1<<4) ? 4 : (n) <= (1<<5) ? 5 :\
+(n) <= (1<<6) ? 6 : (n) <= (1<<7) ? 7 :\
+(n) <= (1<<8) ? 8 : (n) <= (1<<9) ? 9 :\
+(n) <= (1<<10) ? 10 : (n) <= (1<<11) ? 11 :\
+(n) <= (1<<12) ? 12 : (n) <= (1<<13) ? 13 :\
+(n) <= (1<<14) ? 14 : (n) <= (1<<15) ? 15 :\
+(n) <= (1<<16) ? 16 : (n) <= (1<<17) ? 17 :\
+(n) <= (1<<18) ? 18 : (n) <= (1<<19) ? 19 :\
+(n) <= (1<<20) ? 20 : (n) <= (1<<21) ? 21 :\
+(n) <= (1<<22) ? 22 : (n) <= (1<<23) ? 23 :\
+(n) <= (1<<24) ? 24 : (n) <= (1<<25) ? 25 :\
+(n) <= (1<<26) ? 26 : (n) <= (1<<27) ? 27 :\
+(n) <= (1<<28) ? 28 : (n) <= (1<<29) ? 29 :\
+(n) <= (1<<30) ? 30 : (n) <= (1<<31) ? 31 : 32)
+//-----------------------------------------------------------
+module PU
+#( // INPUT PARAMETERS
+  parameter integer OP_WIDTH          = 16,
+  parameter integer WEIGHT_ADDR_WIDTH = 11,
+  parameter integer NUM_PE            = 8,
+  parameter         MODE              = "FPGA",
+  parameter integer VECGEN_CTRL_W     = 9,
+  parameter integer TID_WIDTH         = 8,
+  parameter integer PAD_WIDTH         = 3,
+  parameter integer VECGEN_CFG_W      = TID_WIDTH + PAD_WIDTH
+)( // PORTS
+  input   wire                        clk,
+  input   wire                        reset,
+
+  input   wire                        start,
+  output  wire                        done,
+
+  input   wire [DATA_IN_WIDTH-1 :0]   read_data,
+
+  input   wire                        read_ready,
+  input   wire                        write_ready,
+  output  wire                        read_req,
+
+  output  wire [DATA_OUT_WIDTH-1:0]   write_data,
+  output  wire                        write_req,
+
+  output  wire [1:0]                  STATE
+);
+
+
+// ******************************************************************
+// LOCALPARAMS
+// ******************************************************************
+    localparam integer DATA_IN_WIDTH                = OP_WIDTH * NUM_PE;
+    localparam integer DATA_OUT_WIDTH               = OP_WIDTH * NUM_PE;
+    localparam integer PE_CTRL_WIDTH                = 9;
+    localparam integer DATA_POOLING_OUT_WIDTH       = DATA_IN_WIDTH;
+    localparam integer COUNTER_WIDTH                = `C_LOG_2(NUM_PE)+1;
+
+// ******************************************************************
+// WIRES
+// ******************************************************************
+    genvar i;
+
+    wire [DATA_IN_WIDTH+OP_WIDTH  -1 :0]    data_out_neighbor;
+    wire [PE_CTRL_WIDTH           -1 :0]    pe_ctrl;
+    wire [OP_WIDTH                -1 :0]    buf_rd_weight;
+    wire [2                       -1 :0]    pe_out_ctrl;
+    wire                                    save_rd_addr;
+    wire                                    restore_rd_addr;
+    wire [2                       -1 :0]    pe_buf_ctrl;
+
+    //-----------vectorgen-----------
+    wire [DATA_IN_WIDTH           -1 :0]    vectorgen_data_in;
+    wire [DATA_IN_WIDTH+OP_WIDTH  -1 :0]    vectorgen_data_out;
+    wire [VECGEN_CTRL_W           -1 :0]    vectorgen_ctrl;
+    wire [VECGEN_CFG_W            -1 :0]    vectorgen_cfg;
+
+    //-----------inbuf-----------
+    wire                                    inbuf_empty;
+    wire                                    inbuf_pop;
+
+    // WEIGTHS
+    wire                                    mem_en;
+    wire [WEIGHT_ADDR_WIDTH       -1 :0]    wgt_rom_addr;
+    reg  [WEIGHT_ADDR_WIDTH       -1 :0]    wgt_rom_addr_d;
+    reg  [WEIGHT_ADDR_WIDTH       -1 :0]    wgt_rom_addr_dd;
+    reg  [WEIGHT_ADDR_WIDTH       -1 :0]    wgt_rom_addr_ddd;
+
+    wire                                    norm_enable;
+    wire                                    norm_valid;
+    wire [DATA_IN_WIDTH           -1 :0]    norm_data_in;
+    wire [DATA_IN_WIDTH           -1 :0]    norm_data_out;
+
+    wire [DATA_OUT_WIDTH          -1 :0]    macc_data_out;
+    wire                                    INBUF_valid;
+
+    wire [DATA_IN_WIDTH           -1 :0]    PE_buf_data_out;
+    wire                                    PE_buf_push;
+
+    //FC PISO
+    wire                                    fc_pop;
+    wire                                    fc_piso_load;
+    wire                                    fc_piso_shift;
+    wire                                    fc_piso_load_d;
+    wire                                    fc_piso_shift_d;
+    wire [DATA_IN_WIDTH           -1 :0]    fc_piso_in;
+    wire [OP_WIDTH                -1 :0]    fc_piso_out;
+
+    wire [OP_WIDTH                -1 :0]    pe_weight;
+
+    wire [COUNTER_WIDTH           -1 :0]    piso_count;
+
+// ******************************************************************
+// Connections
+// ******************************************************************
+    assign data_out_neighbor[DATA_IN_WIDTH+OP_WIDTH-1:DATA_IN_WIDTH] =
+      vectorgen_data_out[DATA_IN_WIDTH+OP_WIDTH-1:DATA_IN_WIDTH];
+    assign inbuf_empty = PE_BUFFER_GENBLK[0].rd_empty;
+    //assign read_req = inbuf_pop;
+    assign read_req = read_ready;
+
+    register #(1) inbuf_valid (clk, reset, read_req, INBUF_valid);
+
+    //assign vectorgen_data_in = read_data;
+
+// ******************************************************************
+// INSTANTIATIONS
+// ******************************************************************
+
+// ==================================================================
+// FIFO for PEs
+// ==================================================================
+generate
+for (i=0; i<NUM_PE; i=i+1)
+begin : PE_BUFFER_GENBLK
+
+    wire rd_en, rd_empty, wr_en, wr_full;
+    wire [OP_WIDTH-1:0] rd_data;
+    wire [OP_WIDTH-1:0] wr_data;
+
+    assign rd_en = (inbuf_pop && !fc_piso_pop) || fc_piso_load;
+    assign wr_en = INBUF_valid || PE_buf_push;
+    assign PE_buf_data_out [i*OP_WIDTH+:OP_WIDTH] = rd_data;
+    assign wr_data = INBUF_valid ? read_data [i*OP_WIDTH+:OP_WIDTH] : PE_buf_push ? macc_data_out[i*OP_WIDTH+:OP_WIDTH] : 'b0;
+
+    PE_buffer
+    #(  // Parameters
+        .DATA_WIDTH         ( OP_WIDTH        ),
+        .ADDR_WIDTH         ( 7                 )
+    ) PE_buf_inst (
+        .CLK                ( clk               ),  //input
+        .RESET              ( reset             ),  //input
+        .PUSH               ( wr_en             ),  //input
+        .FULL               ( wr_full           ),  //output
+        .POP                ( rd_en             ),  //input
+        .SAVE_RD_ADDR       ( save_rd_addr      ),  //input
+        .RESTORE_RD_ADDR    ( restore_rd_addr   ),  //input
+        .EMPTY              ( rd_empty          ),  //output
+        .DATA_IN            ( wr_data           ),  //input
+        .DATA_OUT           ( rd_data           )   //output
+    );
+
+    //xilinx_bram_fifo
+    //#(  // Parameters
+    //    .DATA_WIDTH                 ( OP_WIDTH        ),
+    //    .ALMOST_FULL_OFFSET         ( 9'h080            ),
+    //    .ALMOST_EMPTY_OFFSET        ( 9'h080            ),
+    //    .FIFO_SIZE                  ( "36Kb"            ),
+    //    .FIRST_WORD_FALL_THROUGH    ( "FALSE"           ),
+    //    .MODE                       ( MODE              )
+    //) PE_BUFFER
+    //(  // Ports
+    //    .reset                      ( reset             ),
+    //    .RD_CLK                     ( clk               ),
+    //    .RD_EN                      ( RD_EN             ),
+    //    .RD_EMPTY                   ( RD_EMPTY          ),
+    //    .RD_ALMOSTEMPTY             (                   ),
+    //    .RD_DATA                    ( RD_DATA           ),
+    //    .RD_COUNT                   (                   ),
+    //    .RD_ERR                     (                   ),
+    //    .WR_CLK                     ( clk               ),
+    //    .WR_EN                      ( WR_EN             ),
+    //    .WR_FULL                    ( WR_FULL           ),
+    //    .WR_ALMOSTFULL              (                   ),
+    //    .WR_DATA                    ( WR_DATA           ),
+    //    .WR_COUNT                   (                   ),
+    //    .WR_ERR                     (                   )
+    //);
+
+end
+endgenerate
+
+assign fc_piso_in = PE_buf_data_out;
+piso
+#( // INPUT PARAMETERS
+    .DATA_IN_WIDTH      ( DATA_IN_WIDTH     ),
+    .DATA_OUT_WIDTH     ( OP_WIDTH        )
+) fc_piso
+(  // PORTS
+    .CLK                ( clk               ),
+    .RESET              ( reset             ),
+    .LOAD               ( fc_piso_load_d    ),
+    .SHIFT              ( fc_piso_shift_d   ),
+    .DATA_IN            ( fc_piso_in        ),
+    .DATA_OUT           ( fc_piso_out       )
+);
+
+register #(1) load (clk, reset, fc_piso_load, fc_piso_load_d);
+register #(1) shift (clk, reset, fc_piso_shift, fc_piso_shift_d);
+
+assign fc_piso_load  = fc_piso_pop && piso_count == 0;
+assign fc_piso_shift = fc_piso_pop && piso_count != 0;
+
+wire [COUNTER_WIDTH-1:0] piso_counter_max_count = NUM_PE-1;
+wire [COUNTER_WIDTH-1:0] piso_counter_default = 0;
+counter #(
+    .COUNT_WIDTH        ( COUNTER_WIDTH     )
+)
+piso_counter (
+    .CLK                ( clk                   ),  //input
+    .RESET              ( reset                 ),  //input
+    .CLEAR              ( 1'b0                  ),  //input
+    .DEFAULT            ( piso_counter_default  ),  //input
+    .INC                ( fc_piso_pop           ),  //input
+    .DEC                ( 1'b0                  ),  //input
+    .MIN_COUNT          ( {COUNTER_WIDTH{1'b0}} ),  //input
+    .MAX_COUNT          ( piso_counter_max_count),  //input
+    .OVERFLOW           (                       ),  //output
+    .COUNT              ( piso_count            )   //output
+);
+
+// ==================================================================
+
+// ==================================================================
+// Generate Vectors
+// ==================================================================
+  assign vectorgen_data_in = (PE_weight_sel == 0) ? PE_buf_data_out : read_data;
+  wire vecgen_read_ready;
+  assign inbuf_empty = !vecgen_read_ready;
+  vectorgen # (
+    .OP_WIDTH           ( OP_WIDTH          ),
+    .NUM_PE             ( NUM_PE            )
+  ) vecgen (
+    .clk                ( clk               ),
+    .reset              ( reset             ),
+    .ctrl               ( vectorgen_ctrl    ),
+    .cfg                ( vectorgen_cfg     ),
+    .read_data          ( vectorgen_data_in ),
+    .read_ready         ( vecgen_read_ready ),
+    .read_req           ( inbuf_pop         ),
+    .write_data         ( vectorgen_data_out),
+    .write_valid        ( vectorgen_ready   )
+  );
+// ==================================================================
+
+// ==================================================================
+// Generate Weights
+// ==================================================================
+    register #(1) sel_mux (clk, reset, fc_piso_pop, PE_weight_sel);
+    mux_2x1 #(
+        .DATA_WIDTH         ( OP_WIDTH        ),
+        .REGISTERED         ( "NO"              )
+    ) fifo_input_mux (
+        .clk                ( clk               ),
+        .reset              ( reset             ),
+        .in_0               ( buf_rd_weight     ),
+        .in_1               ( fc_piso_out       ),
+        .sel                ( PE_weight_sel     ),
+        .out                ( pe_weight         )
+    );
+// ==================================================================
+
+// ==================================================================
+// COMPUTE
+// ==================================================================
+
+generate
+    for (i=0; i<NUM_PE; i=i+1)
+    begin : PE_GENBLK
+
+        wire [OP_WIDTH    -1:0]   pe_DATA_IN_MEM;
+        wire [OP_WIDTH    -1:0]   pe_DATA_IN_NEIGHBOR;
+        wire [OP_WIDTH    -1:0]   pe_DATA_OUT_NEIGHBOR;
+        wire [OP_WIDTH-1:0]   pe_MACC_DATA_OUT;
+        wire [OP_WIDTH    -1:0]   pe_NORM_DATA_OUT;
+        wire [OP_WIDTH-1:0]   pe_add_data;
+
+        reg  [OP_WIDTH    -1:0]   pe_DATA_IN_MEM_d;
+
+        assign pe_DATA_IN_MEM       = vectorgen_data_out [i*OP_WIDTH+:OP_WIDTH];
+        assign pe_DATA_IN_NEIGHBOR  = data_out_neighbor [(i+1)*OP_WIDTH+:OP_WIDTH];
+
+        assign norm_data_in [i*OP_WIDTH+:OP_WIDTH]          = pe_NORM_DATA_OUT;
+        assign data_out_neighbor [i*OP_WIDTH+:OP_WIDTH]     = pe_DATA_OUT_NEIGHBOR;
+        assign macc_data_out[i*OP_WIDTH+:OP_WIDTH]  = pe_MACC_DATA_OUT;
+
+        PE #(   // INPUT PARAMETERS
+            .INPUT_WIDTH        ( OP_WIDTH            ),  //parameter
+            .WEIGHT_WIDTH       ( OP_WIDTH          ),  //parameter
+            .OUTPUT_WIDTH       ( OP_WIDTH        )   //parameter
+        ) u_PE (// PORTS
+            .CLK                ( clk                   ),  //input
+            .RESET              ( reset                 ),  //input
+            .PE_CTRL            ( pe_ctrl               ),  //input
+            .DATA_IN            ( pe_DATA_IN_MEM        ),  //input
+            .FWD_IN             ( pe_DATA_IN_NEIGHBOR   ),  //input
+            .FWD_OUT            ( pe_DATA_OUT_NEIGHBOR  ),  //input
+            .WEIGHT             ( pe_weight             ),  //input
+            .DATA_OUT           ( pe_MACC_DATA_OUT      ),  //output
+            .NORM_OUT           ( pe_NORM_DATA_OUT      )   //output
+        );
+
+    end
+endgenerate
+// ==================================================================
+
+
+// ==================================================================
+// PU controller
+// ==================================================================
+  PU_controller
+  #(  // PARAMETERS
+    .NUM_PE             ( NUM_PE            ),
+    .WEIGHT_ADDR_WIDTH  ( WEIGHT_ADDR_WIDTH ),
+    .PE_CTRL_WIDTH      ( 9                 ),
+    .VECGEN_CTRL_W      ( VECGEN_CTRL_W     ),
+    .TID_WIDTH          ( TID_WIDTH         ),
+    .PAD_WIDTH          ( PAD_WIDTH         )
+  ) u_controller (   // PORTS
+    .clk                ( clk               ), //input
+    .reset              ( reset             ), //input
+    .start              ( start             ), //input
+    .done               ( done              ), //output
+    .vectorgen_ready    ( ready             ), //input
+    .ctrl               ( vectorgen_ctrl    ), //output
+    .cfg                ( vectorgen_cfg     )  //output
+  );
+// ==================================================================
+//
+//
+//
+//  -----  // ==================================================================
+//  -----  // PU controller
+//  -----  // ==================================================================
+//  -----      PU_controller
+//  -----      #(  // PARAMETERS
+//  -----          .NUM_PE             ( NUM_PE            ),
+//  -----          .WEIGHT_ADDR_WIDTH  ( WEIGHT_ADDR_WIDTH ),
+//  -----          .PE_CTRL_WIDTH      ( 9                 )
+//  -----      ) u_PU_Controller (   // PORTS
+//  -----          .CLK                ( clk               ), //input
+//  -----          .RESET              ( reset             ), //input
+//  -----          .START              ( start             ), //input
+//  -----          .DONE               ( done              ), //output
+//  -----          .vectorgen_ctrl     ( vectorgen_ctrl    ), //input
+//  -----          .VECTORGEN_READY    ( vectorgen_ready   ), //input
+//  -----          .OUTBUF_READY       ( write_ready       ), //input
+//  -----          .PE_CTRL            ( pe_ctrl           ), //output
+//  -----          .PE_BUF_CTRL        ( pe_buf_ctrl       ), //output
+//  -----          .OUT_VALID_CTRL     ( pe_out_ctrl       ), //output
+//  -----          .WGT_BUF_ADDR       ( wgt_rom_addr      ), //output
+//  -----          .FC_POP             ( fc_piso_pop       ), //output
+//  -----          .STATE              ( STATE             )  //output
+//  -----      );
+
+    assign write_req        = pe_out_ctrl[0];
+    assign PE_buf_push      = pe_out_ctrl[1];
+
+    assign restore_rd_addr  = pe_buf_ctrl[0];
+    assign save_rd_addr     = pe_buf_ctrl[1];
+// ==================================================================
+
+// ==================================================================
+// WEIGHT ROM
+// ==================================================================
+    assign mem_en = 1'b1;
+    always @(posedge clk)
+    begin:DELAY_ADDR
+        if (reset)
+        begin
+            wgt_rom_addr_d   <= 'b0;
+            wgt_rom_addr_dd  <= 'b0;
+            wgt_rom_addr_ddd <= 'b0;
+        end else
+        begin
+            wgt_rom_addr_d   <= wgt_rom_addr;
+            wgt_rom_addr_dd  <= wgt_rom_addr_d;
+            wgt_rom_addr_ddd <= wgt_rom_addr_dd;
+        end
+
+    end
+    //ROM #(
+    //    .DATA_WIDTH     ( OP_WIDTH  )
+    //) u_wgt_buf (
+    //    .CLK            ( clk           ), //input
+    //    .RESET          ( reset         ), //input
+    //    .ADDRESS        ( wgt_rom_addr  ), //input
+    //    .ENABLE         ( mem_en        ), //input
+    //    .DATA_OUT       ( buf_rd_weight )  //output
+    //);
+    assign buf_rd_weight = wgt_rom_addr_d;
+// ==================================================================
+
+// ==================================================================
+// NORMALIZATION
+// ==================================================================
+    /*assign norm_enable = PE_buf_push;
+    normalization
+    #( // INPUT PARAMETERS
+        .DATA_WIDTH     ( OP_WIDTH    ),
+        .NUM_PE         ( NUM_PE        )
+    ) norm_PU ( // PORTS
+        .CLK            ( clk           ),
+        .RESET          ( reset         ),
+        .ENABLE         ( norm_enable   ),
+        .SQUARE_SUM     ( macc_data_out ),
+        .LRN_CENTER     ( norm_data_in  ),
+        .NORM_OUT       ( norm_data_out ),
+        .OUT_VALID      ( norm_valid    )
+    );
+    */
+
+    //assign write_data = macc_data_out || norm_data_out;
+    assign write_data = macc_data_out;
+    //assign write_req = norm_valid;
+endmodule

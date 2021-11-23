@@ -1,0 +1,6 @@
+verilog xil_defaultlib --include "../../../ipstatic/hdl" \
+"../../../../axi_dwidth_converter_64b_to_512b/sim/axi_dwidth_converter_64b_to_512b.v" \
+
+verilog xil_defaultlib "glbl.v"
+
+nosort
