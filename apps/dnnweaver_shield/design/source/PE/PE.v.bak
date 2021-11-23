@@ -1,0 +1,133 @@
+`timescale 1ns/1ps
+module PE #(
+    // INPUT PARAMETERS
+    parameter INPUT_WIDTH   = 16,
+    parameter WEIGHT_WIDTH  = 16,
+    parameter OUTPUT_WIDTH  = 48,
+    parameter LAYER_NORM    = "NO"
+)
+(
+    // PORTS
+    input  wire                             CLK,
+    input  wire                             RESET,
+    input  wire [ PE_CTRL_WIDTH -1 : 0]     PE_CTRL,
+    input  wire [ INPUT_WIDTH   -1 : 0]     DATA_IN,
+    input  wire [ INPUT_WIDTH   -1 : 0]     FWD_IN,
+    input  wire [ WEIGHT_WIDTH  -1 : 0]     WEIGHT,
+    output reg  [ INPUT_WIDTH   -1 : 0]     FWD_OUT,
+    output wire [ OUTPUT_WIDTH  -1 : 0]     DATA_OUT,
+    output wire [ INPUT_WIDTH   -1 : 0]     NORM_OUT
+);
+
+// ******************************************************************
+// LOCALPARAMS
+// ******************************************************************
+    localparam integer PE_CTRL_WIDTH   = 9;
+    localparam integer MACC_CTRL_WIDTH = 4;
+// ******************************************************************
+// WIRES & REGS
+// ******************************************************************
+    // control
+    wire                        enable;
+    wire                        accumulate;
+    wire                        mul;
+    wire                        data_src_sel;
+    wire [MACC_CTRL_WIDTH-1:0]  macc_ctrl;
+    wire                        fifo_push_norm;
+    wire 			            fifo_pop_norm;
+    // data
+    wire [INPUT_WIDTH-1    :0]  data_in;
+    wire [OUTPUT_WIDTH-1   :0]  fifo_in;
+    wire [OUTPUT_WIDTH-1   :0]  fifo_out;
+    wire                        data_valid;
+    wire                        centre_data_valid;
+    // fifo
+    wire                        fifo_push;
+    wire                        fifo_pop;
+    wire                        is_normalization;
+    wire [4:0]                  fifo_count;
+// ******************************************************************
+// LOGIC
+// ******************************************************************
+    // Control
+    assign enable       = PE_CTRL[0];
+    assign accumulate   = PE_CTRL[1];
+    assign mul          = PE_CTRL[2];
+    assign data_src_sel = PE_CTRL[3];
+    assign fifo_push    = PE_CTRL[4];
+    assign fifo_pop     = PE_CTRL[5];
+    assign is_normalization = PE_CTRL[6];
+    assign data_valid   = PE_CTRL[7];
+    assign centre_data_valid     = PE_CTRL[8];
+ 
+    assign fifo_push_norm = centre_data_valid;
+    assign fifo_pop_norm  = data_valid;
+
+    //Data Forwarding Register
+    always @ (posedge CLK)
+    begin : DATA_FORWARDING
+        if (RESET) 
+            FWD_OUT <= 0;
+        else 
+            FWD_OUT <= data_in;
+    end
+// ******************************************************************
+// INSTANTIATIONS
+// ******************************************************************
+
+    // MUX - data source
+    assign data_in  = data_src_sel ? FWD_IN : DATA_IN;
+
+    assign macc_ctrl[0] = enable;
+    assign macc_ctrl[1] = mul;
+    assign macc_ctrl[2] = accumulate;
+    assign macc_ctrl[3] = is_normalization;
+
+    macc #(
+        .WIDTH_0            ( INPUT_WIDTH   ),
+        .WIDTH_1            ( INPUT_WIDTH   ),
+        .WIDTH_OUT          ( OUTPUT_WIDTH  )
+    ) MACC_pe (
+        .CLK                ( CLK           ),  //input
+        .RESET              ( RESET         ),  //input
+        .MACC_CTRL          ( macc_ctrl     ),  //input
+        .MUL_0              ( data_in       ),  //input
+        .MUL_1              ( WEIGHT        ),  //input
+        .ADD                ( fifo_out      ),  //input
+        .OUT                ( DATA_OUT      )   //output
+    );
+
+    assign fifo_in = DATA_OUT;
+    fifo#(
+        .DATA_WIDTH         ( OUTPUT_WIDTH  ),
+        .RAM_DEPTH          ( 20            ),
+        .ADDR_WIDTH         ( 4             )
+    ) local_buf_macc (
+        .clk                ( CLK           ),  //input
+        .reset              ( RESET         ),  //input
+        .push               ( fifo_push     ),  //input
+        .pop                ( fifo_pop      ),  //input
+        .data_in            ( fifo_in       ),  //input
+        .data_out           ( fifo_out      ),  //output
+        .full               (               ),  //output
+        .empty              (               ),  //output
+        .fifo_count         ( fifo_count    )   //output
+    );
+    
+    fifo#(
+        .DATA_WIDTH         ( INPUT_WIDTH   ),
+        .RAM_DEPTH          ( 20            ),
+        .ADDR_WIDTH         ( 4             )
+    ) local_buf_norm (
+        .clk                ( CLK           ),  //input
+        .reset              ( RESET         ),  //input
+        .push               ( fifo_push_norm),  //input
+        .pop                ( fifo_pop_norm ),  //input
+        .data_in            ( data_in       ),  //input
+        .data_out           ( NORM_OUT      ),  //output
+        .full               (               ),  //output
+        .empty              (               ),  //output
+        .fifo_count         (               )   //output
+    );
+
+endmodule

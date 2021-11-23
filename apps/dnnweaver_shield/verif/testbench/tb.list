@@ -1,0 +1,17 @@
+#loopback
+#loopback_pu_controller
+#PU
+#serdes
+#axi_master
+#axi_master_wrapper
+#mem_controller
+dnn_accelerator
+#pooling
+#controller
+#vectorgen
+#convolution
+#inner_product
+#weight_buffer
+#mem_controller_4AXI
+#read_info
+#buffer_read_counter

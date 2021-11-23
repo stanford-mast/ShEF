@@ -1,0 +1,238 @@
+`timescale 1ns/1ps
+module vectorgen # (
+  parameter integer OP_WIDTH        = 8,
+  parameter integer NUM_PE          = 8,
+  parameter integer VECGEN_CTRL_W   = 7,
+  parameter integer TID_WIDTH       = 8,
+  parameter integer PAD_WIDTH       = 3,
+  parameter integer STRIDE_WIDTH    = 3,
+  parameter integer VECGEN_CFG_W    = TID_WIDTH + PAD_WIDTH,
+  parameter integer MAX_KERNEL_SIZE = 11,
+  parameter integer MAX_STRIDE      = 4,
+  parameter integer MAX_PADDING     = 2
+) (
+  input  wire                         clk,
+  input  wire                         reset,
+
+  input  wire [VECGEN_CTRL_W - 1:0]   ctrl,
+  input  wire [VECGEN_CFG_W  - 1:0]   cfg,
+
+  output wire                         ready,
+
+  input  wire                         read_ready,
+  input  wire [INPUT_WIDTH   - 1 :0]  read_data,
+  output reg                          read_req,
+
+  output reg                          write_valid, // TODO generate this
+  output wire [OUTPUT_WIDTH   - 1:0]  write_data,
+  output wire [NUM_PE         - 1:0]  write_mask
+);
+
+//*********************************************************************
+// LOCAL PARAMS
+//*********************************************************************
+  localparam  INPUT_WIDTH  = NUM_PE*OP_WIDTH;
+  localparam  OUTPUT_WIDTH = NUM_PE*OP_WIDTH;
+  localparam  NUM_NEXT_DATA = (NUM_PE-2)*MAX_STRIDE+MAX_KERNEL_SIZE - 1;
+  localparam  NEXT_DATA_WIDTH = NUM_NEXT_DATA * OP_WIDTH;
+//*********************************************************************
+// LOCAL WIRES AND REGS
+//*********************************************************************
+  wire                      vectorgen_pop;
+  wire                      vectorgen_nextrow;
+  wire                      vectorgen_nextfm;
+  wire                      vectorgen_endrow;
+  wire                      vectorgen_shift;
+  wire                      vectorgen_read;
+
+  wire [TID_WIDTH-1:0]      max_threads;
+  reg                       next_write_valid;
+  reg  [INPUT_WIDTH-1:0]    curr_data;
+  wire [INPUT_WIDTH-1:0]    next_data;
+  reg                       curr_data_v;
+  reg                       curr_data_v_d;
+  reg                       next_data_v;
+
+  reg  [TID_WIDTH - 1:0]    tid  [0:NUM_PE-1];
+  reg  [NUM_PE    - 1:0]    mask;
+  reg  [NUM_PE    - 1:0]    mask_d;
+  reg  [NUM_PE    - 1:0]    mask_dd;
+
+  reg  [2*INPUT_WIDTH-1:0]  out_data;
+
+  // Debug
+  wire [TID_WIDTH-1:0]      pe0_tid = tid[0];
+  wire [TID_WIDTH-1:0]      pe1_tid = tid[1];
+  wire [TID_WIDTH-1:0]      pe2_tid = tid[2];
+  wire [TID_WIDTH-1:0]      pe3_tid = tid[3];
+
+  reg  [2*INPUT_WIDTH-1:0]  padded_data;
+  reg  [1*INPUT_WIDTH-1:0]  next_padded_data;
+  reg                       padded_data_v;
+  reg                       padded_pop;
+  reg                       padded_shift;
+  wire [PAD_WIDTH-1:0]      padding;
+
+//*********************************************************************
+// ASSIGN STATEMENTS
+//*********************************************************************
+
+  assign {vectorgen_read, vectorgen_pop, vectorgen_shift,
+    vectorgen_nextrow, vectorgen_skip, vectorgen_endrow,
+    vectorgen_nextfm} = ctrl;
+  assign {max_threads, padding} = cfg;
+
+//*********************************************************************
+// LOGIC
+//*********************************************************************
+  // vector generation logic
+
+  /** Masking logic
+    * Each PE has a thread ID.
+    * When thread ID exceeds input width,
+    * Set Valid for that PE to be 0. */
+  genvar gen;
+  generate
+  for (gen=0; gen<NUM_PE; gen=gen+1)
+  begin
+
+    always @(posedge clk)
+    begin
+      if (reset || vectorgen_nextrow)
+        tid[gen] <= gen;
+      else if (vectorgen_read)
+        tid[gen] <= tid[gen] + NUM_PE;
+    end
+
+    always @(posedge clk)
+    begin
+      mask[gen] <= 1'b1; //tid[gen] < max_threads;
+      mask_d[gen] <= mask[gen];
+      mask_dd[gen] <= mask_d[gen];
+    end
+
+  end
+  endgenerate
+
+  assign write_mask = mask_dd;
+
+  //====================================================
+  /** Padding logic
+    * Use a shifter to pad the inputs */
+  reg read_req_d;
+  reg end_row_d, end_row_dd;
+  reg next_row_d, next_row_dd;
+
+  always @(posedge clk)
+  begin
+    read_req_d <= read_req;
+    end_row_d <= vectorgen_endrow;
+    end_row_dd <= end_row_d;
+    next_row_d <= vectorgen_nextrow;
+    next_row_dd <= next_row_d;
+  end
+
+  always @(posedge clk)
+    next_padded_data <= padded_data >> padding*OP_WIDTH;
+
+  always @(posedge clk)
+  begin
+    if (reset || vectorgen_nextfm)
+      padded_data <= 'b0;
+    else if (end_row_dd)
+      padded_data <= {{INPUT_WIDTH{1'b0}}, curr_data, next_padded_data} >>
+                      (INPUT_WIDTH-padding*OP_WIDTH);
+    else if (next_row_dd)
+      padded_data <= {next_data, curr_data, {INPUT_WIDTH{1'b0}}} >>
+                      (INPUT_WIDTH-padding*OP_WIDTH);
+    else if (read_req_d)
+      padded_data <= {next_data, curr_data, next_padded_data} >>
+                      (INPUT_WIDTH-padding*OP_WIDTH);
+    //else if (read_req_d && next_data_v)
+    //  padded_data <= {next_data, curr_data, padded_data[INPUT_WIDTH-1:0]} >> (INPUT_WIDTH-padding*OP_WIDTH);
+  end
+
+  always @(posedge clk)
+    if (reset)
+      padded_data_v <= 1'b0;
+    else if (vectorgen_pop && next_data_v)
+      padded_data_v <= 1'b1;
+    else if (!next_data_v)
+      padded_data_v <= 1'b0;
+
+  always @(posedge clk)
+  begin: PAD_DELAY
+    if (reset) begin
+      padded_pop <= 1'b0;
+      padded_shift <= 1'b0;
+    end else begin
+      padded_pop <= vectorgen_pop;
+      padded_shift <= vectorgen_shift;
+    end
+  end
+//====================================================
+
+  assign ready = next_data_v;
+  assign next_data = read_data;
+
+  always@(posedge clk)
+    curr_data_v_d <= curr_data_v;
+
+  always@(posedge clk)
+    if (!curr_data_v_d || vectorgen_read || vectorgen_skip)
+      curr_data <= read_data;
+
+  always@(posedge clk)
+  begin
+    if (reset)
+      out_data <= 'b0;
+    else begin
+      if (padded_pop && padded_data_v)
+        out_data <= padded_data;
+      else if (padded_shift)
+        out_data <= out_data >> OP_WIDTH;
+    end
+  end
+
+  assign write_data = out_data;
+
+  always @(posedge clk)
+  begin
+    if (reset || vectorgen_nextfm)
+      curr_data_v <= 1'b0;
+    else if (read_req && read_ready)
+      curr_data_v <= 1'b1;
+  end
+
+  always @(posedge clk)
+  begin
+    if (reset || !curr_data_v)
+      next_data_v <= 1'b0;
+    else if (read_req && read_ready)
+      next_data_v <= 1'b1;
+  end
+
+  always @(posedge clk)
+  begin: OUTPUT_VALID
+    if (reset)
+      write_valid <= 1'b0;
+    else if (next_data_v && (padded_shift||padded_pop))
+      write_valid <= 1'b1;
+    else
+      write_valid <= 1'b0;
+  end
+
+  always @(posedge clk)
+  begin: INPUT_READ_REQUEST
+    if (reset)
+      read_req <= 0;
+    else begin
+      if (!curr_data_v || (!next_data_v && !read_req)
+        || vectorgen_read || vectorgen_skip)
+        read_req <= 1;
+      else
+        read_req <= 0;
+    end
+  end
+
+endmodule
