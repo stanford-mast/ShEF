@@ -83,6 +83,8 @@ Repeat the same steps from [Developer Instance Setup](#developer-instance-setup)
 ShEF's project structure is organized as follows.
 - `apps/`: Benchmark applications built using the Hardware Development Kit (pure RTL).
 - `hdk/`: Source code for the ShEF Shield.
+- `boot/`: Source code for secure boot and remote attestation for an Ultra96 device. (Documentation and Build Scripts under development!)
+- `sdaccel/`: Source code for SDAccel applications. (Documentation and Build Scripts for use with ShEF Shield under development!)
 
 ## Example Workflow using DNNWeaver
 Next, we walk through how to build and run an accelerator using DNNWeaver, with Shield enabled, as an example.
