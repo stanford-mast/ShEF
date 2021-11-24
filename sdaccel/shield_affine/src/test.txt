@@ -1,0 +1,57 @@
+28a29,32
+> #include <math.h>
+> #include <stdio.h>
+> 
+> 
+37,40c41,42
+< 
+< __kernel __attribute__ ((reqd_work_group_size(1, 1, 1)))
+< void affine_kernel(__global unsigned int *image1,
+<                    __global unsigned int *image2
+---
+> void sw_affine(unsigned int *image1,
+>                    unsigned int *image2
+68,69c70,72
+<    __local unsigned int    output_buffer[X_SIZE];
+< 
+---
+>    unsigned int    output_buffer[X_SIZE];
+> 	
+> 	int ctr = 0;
+103,105d105
+< 
+< 
+< 		__attribute__((xcl_pipeline_loop))
+119c119
+< 
+---
+> 				 ctr ++;
+134a135
+> 
+159a161,162
+> 		      //gray_new = (1.0f - y_frac) * ((1.0f - x_frac) * (image1[(n * X_SIZE) + m])       + x_frac * (image1[(n * X_SIZE) + m + 1])) + 
+>           //                     y_frac  * ((1.0f - x_frac) * (image1[((n + 1) * X_SIZE) + m]) + x_frac * (image1[((n + 1) * X_SIZE) + m + 1]));
+168a172
+>             //output_buffer[x] = (unsigned short)gray_new;
+170c174
+<          else if (((m + 1 == X_SIZE) && (n >= 0) && (n < Y_SIZE)) || ((n + 1 == Y_SIZE) && (m >= 0) && (m < X_SIZE)))
+---
+>          else if (((m + 1 == X_SIZE) && (n >= 0) && (n < Y_SIZE)) || ((n + 1 == Y_SIZE) && (m >= 0) && (m < X_SIZE))) 
+179,188c183,186
+< 
+< 		//Copy the result out
+< 	__attribute__((xcl_pipeline_loop))
+< 	 for(int i = 0; i< X_SIZE; i++){
+< 		 image2[y*X_SIZE + i] = output_buffer[i];
+< 	 }
+< 
+<       //event_t copy_complete = async_work_group_copy(&image2[(y * X_SIZE)]), (&output_buffer), X_SIZE, copy_complete);
+< 
+<       //wait_group_events(1, &copy_complete);
+---
+> 			//Copy the result out
+> 			for(int i = 0; i< X_SIZE; i++){
+> 				image2[y*X_SIZE + i] = output_buffer[i];
+> 			}
+189a188
+> 	 printf("Ctr: %d\n", ctr);
