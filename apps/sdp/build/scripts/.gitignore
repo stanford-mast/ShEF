@@ -1,0 +1,5 @@
+*.log
+.Xil
+!.gitignore
+hd_visual/
+last_log

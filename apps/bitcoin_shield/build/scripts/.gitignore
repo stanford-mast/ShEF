@@ -1,5 +1,6 @@
 *.log
 .Xil
+*.out
 !.gitignore
 hd_visual/
 last_log

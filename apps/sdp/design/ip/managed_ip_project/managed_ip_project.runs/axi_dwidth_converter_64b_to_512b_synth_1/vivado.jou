@@ -1,0 +1,12 @@
+#-----------------------------------------------------------
+# Vivado v2019.2 (64-bit)
+# SW Build 2700185 on Thu Oct 24 18:45:48 MDT 2019
+# IP Build 2699827 on Thu Oct 24 21:16:38 MDT 2019
+# Start of session at: Mon Jul  6 23:00:00 2020
+# Process ID: 9102
+# Current directory: /home/centos/src/project_data/free/apps/dnnweaver/design/ip/managed_ip_project/managed_ip_project.runs/axi_dwidth_converter_64b_to_512b_synth_1
+# Command line: vivado -log axi_dwidth_converter_64b_to_512b.vds -product Vivado -mode batch -messageDb vivado.pb -notrace -source axi_dwidth_converter_64b_to_512b.tcl
+# Log file: /home/centos/src/project_data/free/apps/dnnweaver/design/ip/managed_ip_project/managed_ip_project.runs/axi_dwidth_converter_64b_to_512b_synth_1/axi_dwidth_converter_64b_to_512b.vds
+# Journal file: /home/centos/src/project_data/free/apps/dnnweaver/design/ip/managed_ip_project/managed_ip_project.runs/axi_dwidth_converter_64b_to_512b_synth_1/vivado.jou
+#-----------------------------------------------------------
+source axi_dwidth_converter_64b_to_512b.tcl -notrace
